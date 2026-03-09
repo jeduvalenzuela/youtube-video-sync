@@ -13,11 +13,15 @@ class YouTube_Video_Sync {
     private $post_type = 'video';
     
     private function get_api_key() {
-        return get_option('ytvs_api_key', '');
+        $default = 'AIzaSyDjgY_vSpkYJwvbMNR1rzDk9evo7o48Pio';
+        $val = get_option('ytvs_api_key', '');
+        return !empty($val) ? $val : $default;
     }
     
     private function get_channel_id() {
-        return get_option('ytvs_channel_id', '');
+        $default = 'UCkP9R2e_9MyEOXLqwQstClg';
+        $val = get_option('ytvs_channel_id', '');
+        return !empty($val) ? $val : $default;
     }
     
     private $category_map = array(
@@ -53,6 +57,10 @@ class YouTube_Video_Sync {
         }
         if (!get_option('ytvs_filter_keywords')) {
             add_option('ytvs_filter_keywords', 'formato 916, 9:16, #shorts, #short, vertical');
+        }
+        if (!get_option('ytvs_import_mode')) {
+            // 'all' = importar todo, 'playlist_only' = solo importar si pertenece a playlist
+            add_option('ytvs_import_mode', 'all');
         }
         
         // Registrar CPT y taxonomía antes de hacer flush
@@ -246,6 +254,8 @@ class YouTube_Video_Sync {
         register_setting('ytvs_settings_group', 'ytvs_api_key');
         register_setting('ytvs_settings_group', 'ytvs_channel_id');
         register_setting('ytvs_settings_group', 'ytvs_filter_keywords');
+        register_setting('ytvs_settings_group', 'ytvs_import_mode');
+        register_setting('ytvs_settings_group', 'ytvs_import_fields');
         
         add_settings_section(
             'ytvs_main_section',
@@ -277,6 +287,22 @@ class YouTube_Video_Sync {
             'youtube-sync-settings',
             'ytvs_main_section'
         );
+
+        add_settings_field(
+            'ytvs_import_mode',
+            'Modo de Importación',
+            array($this, 'import_mode_field_callback'),
+            'youtube-sync-settings',
+            'ytvs_main_section'
+        );
+
+        add_settings_field(
+            'ytvs_import_fields',
+            'Campos a importar',
+            array($this, 'import_fields_field_callback'),
+            'youtube-sync-settings',
+            'ytvs_main_section'
+        );
     }
     
     public function settings_section_callback() {
@@ -299,6 +325,25 @@ class YouTube_Video_Sync {
         $value = get_option('ytvs_filter_keywords', 'formato 916, 9:16, #shorts, #short, vertical');
         echo '<textarea name="ytvs_filter_keywords" rows="3" class="large-text">' . esc_textarea($value) . '</textarea>';
         echo '<p class="description">Videos que contengan estas palabras en el título o descripción serán excluidos. Separa las palabras con comas. Ejemplo: <code>#shorts, vertical, 9:16</code></p>';
+    }
+
+    public function import_mode_field_callback() {
+        $value = get_option('ytvs_import_mode', 'all');
+        ?>
+        <label><input type="radio" name="ytvs_import_mode" value="all" <?php checked($value, 'all'); ?>> Importar todos los videos</label><br>
+        <label><input type="radio" name="ytvs_import_mode" value="playlist_only" <?php checked($value, 'playlist_only'); ?>> Solo importar videos que pertenezcan a alguna playlist del canal</label>
+        <p class="description">Si eliges "Solo playlist", los videos que no estén en ninguna playlist del canal no se importarán.</p>
+        <?php
+    }
+
+    public function import_fields_field_callback() {
+        $value = get_option('ytvs_import_fields', 'both');
+        ?>
+        <label><input type="radio" name="ytvs_import_fields" value="both" <?php checked($value, 'both'); ?>> Importar título y descripción</label><br>
+        <label><input type="radio" name="ytvs_import_fields" value="title_only" <?php checked($value, 'title_only'); ?>> Solo importar el título (contenido vacío)</label><br>
+        <label><input type="radio" name="ytvs_import_fields" value="none" <?php checked($value, 'none'); ?>> No importar título ni descripción (usar título genérico y contenido vacío)</label>
+        <p class="description">Controla qué campos se copian desde YouTube al post.</p>
+        <?php
     }
     
     public function settings_page_html() {
@@ -438,7 +483,7 @@ class YouTube_Video_Sync {
         $report_details = array();
 
         foreach ($data->items as $item) {
-            $video_id = $item->snippet->resourceId->videoId;
+                $video_id = $item->snippet->resourceId->videoId;
             $video_title = $item->snippet->title;
 
             // Evitar duplicados
@@ -475,13 +520,36 @@ class YouTube_Video_Sync {
                     continue;
                 }
 
+                // Comportamiento según modo de importación
+                $import_mode = get_option('ytvs_import_mode', 'all');
+                if ($import_mode === 'playlist_only') {
+                    $playlists = $this->get_playlists_for_video($video_id);
+                    if (empty($playlists)) {
+                        // No está en ninguna playlist relevante, saltar importación
+                        continue;
+                    }
+                }
+
                 // Convertir la fecha de publicación de YouTube a formato WordPress
                 $youtube_date = $details->snippet->publishedAt;
                 $post_date = date('Y-m-d H:i:s', strtotime($youtube_date));
 
+                // Determinar qué campos importar según la opción
+                $import_fields = get_option('ytvs_import_fields', 'both');
+                if ($import_fields === 'both') {
+                    $post_title = $details->snippet->title;
+                    $post_content = $details->snippet->description;
+                } elseif ($import_fields === 'title_only') {
+                    $post_title = $details->snippet->title;
+                    $post_content = '';
+                } else { // 'none'
+                    $post_title = 'Video de YouTube';
+                    $post_content = '';
+                }
+
                 $post_id = wp_insert_post(array(
-                    'post_title'   => $details->snippet->title,
-                    'post_content' => $details->snippet->description,
+                    'post_title'   => $post_title,
+                    'post_content' => $post_content,
                     'post_status'  => 'publish',
                     'post_type'    => $this->post_type,
                     'post_date'    => $post_date,
@@ -491,7 +559,13 @@ class YouTube_Video_Sync {
                 if ($post_id) {
                     update_post_meta($post_id, '_youtube_video_id', $video_id);
                     update_post_meta($post_id, 'youtube_url', "https://www.youtube.com/watch?v=" . $video_id);
-                    update_post_meta($post_id, 'descripcion', $details->snippet->description);
+                    // Guardar descripción solo si se importó
+                    $import_fields = get_option('ytvs_import_fields', 'both');
+                    if ($import_fields === 'both') {
+                        update_post_meta($post_id, 'descripcion', $details->snippet->description);
+                    } else {
+                        update_post_meta($post_id, 'descripcion', '');
+                    }
                     
                     $thumb = $details->snippet->thumbnails->high->url;
                     $img_id = $this->upload_image($thumb, $post_id);
@@ -560,7 +634,9 @@ class YouTube_Video_Sync {
 
     private function assign_playlist_taxonomy($post_id, $video_id) {
         // Buscar playlists del canal y verificar si el video está en cada una
-        $channel_playlists_url = "https://www.googleapis.com/youtube/v3/playlists?part=snippet&channelId={$this->channel_id}&maxResults=50&key={$this->api_key}";
+        $api_key = $this->get_api_key();
+        $channel_id = $this->get_channel_id();
+        $channel_playlists_url = "https://www.googleapis.com/youtube/v3/playlists?part=snippet&channelId={$channel_id}&maxResults=50&key={$api_key}";
         $response = wp_remote_get($channel_playlists_url);
         
         if (is_wp_error($response)) return;
@@ -604,6 +680,40 @@ class YouTube_Video_Sync {
         if (!empty($playlist_terms)) {
             wp_set_post_terms($post_id, $playlist_terms, 'ciudad', false);
         }
+    }
+
+    /**
+     * Devuelve un array con los nombres de playlists del canal que contienen el video.
+     * Si el array está vacío, significa que el video no pertenece a ninguna playlist del canal.
+     */
+    private function get_playlists_for_video($video_id) {
+        $api_key = $this->get_api_key();
+        $channel_id = $this->get_channel_id();
+
+        $channel_playlists_url = "https://www.googleapis.com/youtube/v3/playlists?part=snippet&channelId={$channel_id}&maxResults=50&key={$api_key}";
+        $response = wp_remote_get($channel_playlists_url);
+        if (is_wp_error($response)) return array();
+
+        $playlists_data = json_decode(wp_remote_retrieve_body($response));
+        if (empty($playlists_data->items)) return array();
+
+        $found_playlists = array();
+
+        foreach ($playlists_data->items as $playlist) {
+            $playlist_id = $playlist->id;
+            $playlist_name = $playlist->snippet->title;
+
+            $check_url = "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet&playlistId={$playlist_id}&videoId={$video_id}&key={$api_key}";
+            $check_response = wp_remote_get($check_url);
+            if (is_wp_error($check_response)) continue;
+
+            $check_data = json_decode(wp_remote_retrieve_body($check_response));
+            if (!empty($check_data->items)) {
+                $found_playlists[] = $playlist_name;
+            }
+        }
+
+        return $found_playlists;
     }
 
     private function get_playlist_details($playlist_id) {
